@@ -834,8 +834,10 @@ async function createSpoolFromTag(uidHex, payload, meta) {
       subtype: meta.subtype || null,
     });
     updateStatus(`Spool created: ${spoolDisplayName(newSpool)}`);
-    // Reloaded rather than refreshed: linking a native tag may have taken it from a listed spool.
-    if (state.spools.length > 0) await fetchSpools(true);
+    if (!state.spools.some(s => s.id === newSpool.id)) {
+      state.spools.unshift(newSpool);
+    }
+    await fetchSpools(true);
     return newSpool;
   } catch (e) {
     updateStatus(`Error creating spool: ${e.message}`);

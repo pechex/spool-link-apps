@@ -619,8 +619,10 @@ class SpoolmanViewModel(application: Application) : AndroidViewModel(application
                 scanHistory[idx] = updated
                 lastResult = updated
             }
-            // Reloaded rather than refreshed: linking a native tag may have taken it from a listed spool.
-            if (spools.isNotEmpty()) fetchSpools(reset = true)
+            if (spools.none { it.id == newSpool.id }) {
+                spools.add(0, newSpool)
+            }
+            fetchSpools(reset = true)
         } catch (e: Exception) {
             statusMessage = "Error creating spool: ${e.message}"
         }
