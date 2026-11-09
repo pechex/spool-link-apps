@@ -58,6 +58,10 @@ a UID the spool already has is reported as an error. See
 
 The `card_uids` custom field must exist before writing; call `ensureCardUidsField()` (or equivalent) on first use.
 
+Steps 3 and 4 run against the store selected under **Settings → Tag Storage**: `extra.card_uids` (default) or
+Spoolman native tags (v0.27.0+). Only the selected store is read or written, as on the printer; see
+[docs/SPOOLMAN.md](./docs/SPOOLMAN.md#tag-storage).
+
 ## Agent Workflow
 
 1. **Context**: Examine existing codebases (Android/iOS/Web) to understand established patterns.

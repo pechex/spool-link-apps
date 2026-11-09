@@ -26,6 +26,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
     var availableFilaments: [SpoolmanAPI.FilamentResponse] = []
     var isLoadingFilaments = false
     var filamentsErrorMessage: String?
+    var isMovingTags = false
+    var tagMoveLogs: [String] = []
     private var spoolsOffset = 0
     // Large enough to load every spool at once so sort, grouping, search, and filter see the whole collection;
     // "Load More" only appears beyond this.
@@ -54,6 +56,22 @@ class SpoolmanViewModel: NFCManagerDelegate {
             spoolsErrorMessage = nil
             lastSpoolsFetch = nil
         }
+    }
+
+    private var tagStore: TagStore { TagStore.current }
+
+    @MainActor
+    func moveTagsToSelectedStore() async {
+        guard !isMovingTags else { return }
+        isMovingTags = true
+        tagMoveLogs = []
+        do {
+            tagMoveLogs = try await api.migrateTags(to: tagStore)
+        } catch {
+            tagMoveLogs = ["✗ \(error.localizedDescription)"]
+        }
+        isMovingTags = false
+        fetchSpools(reset: true)
     }
 
     // MARK: - Spool list
@@ -148,7 +166,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func removeAllTags(from spool: SpoolResponse) async {
-        try? await api.updateSpoolCardUids(id: spool.id, uids: [])
+        try? await api.unlinkAllTags(from: spool, store: tagStore)
         await refreshSpool(id: spool.id)
         if let result = lastResult, result.spoolId == spool.id {
             lastResult = ScanResult(
@@ -164,10 +182,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     @MainActor
     func removeTag(uidHex: String, from spool: SpoolResponse) async {
-        // The caller's spool may be a stale snapshot; filtering it would drop tags assigned since.
-        let currentUIDs = (try? await api.getSpool(id: spool.id))?.tagUIDs ?? spool.tagUIDs
-        let updatedUIDs = currentUIDs.filter { $0.uppercased() != uidHex.uppercased() }
-        try? await api.updateSpoolCardUids(id: spool.id, uids: updatedUIDs)
+        let freshSpool = (try? await api.getSpool(id: spool.id)) ?? spool
+        try? await api.unlinkTag(from: freshSpool, uid: uidHex, store: tagStore)
         await refreshSpool(id: spool.id)
         if let result = lastResult, result.spoolId == spool.id {
             lastResult = ScanResult(
@@ -215,6 +231,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
         statusMessage = "Creating spool…"
         defer { isCreatingSpool = false }
         do {
+            try await api.requireTagStoreSupport(store: tagStore)
             let newSpool: SpoolResponse
             if let meta = overrideMeta ?? tagPayload?.filamentMetadata {
                 let styleRaw = UserDefaults.standard.string(forKey: "filamentNameStyle") ?? ""
@@ -243,7 +260,8 @@ class SpoolmanViewModel: NFCManagerDelegate {
                 }
                 newSpool = try await api.createSpoolFromInfo(
                     filamentId: filamentId,
-                    cardUid: uidHex.isEmpty ? nil : uidHex
+                    cardUid: uidHex.isEmpty ? nil : uidHex,
+                    store: tagStore
                 )
             } else {
                 statusMessage = "Missing filament details"
@@ -336,7 +354,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
     @MainActor
     func processTag(payload: any NFCTagPayload, uidHex: String) async {
         guard let spoolId = payload.spoolId else {
-            let foundSpool = try? await api.findSpoolsByCardUid(uidHex).first
+            let foundSpool = try? await api.findSpoolsByCardUid(uidHex, store: tagStore).first
             let result = ScanResult(
                 spoolId: foundSpool?.id,
                 spoolName: foundSpool?.displayName ?? payload.displayTitle,
@@ -358,20 +376,16 @@ class SpoolmanViewModel: NFCManagerDelegate {
             let spool = try await api.getSpool(id: spoolId)
             let spoolName = spool.displayName
 
-            let currentUIDs = spool.tagUIDs
-            let updatedUIDs = currentUIDs.contains(uidHex) ? currentUIDs : currentUIDs + [uidHex]
-
             statusMessage = "Updating spool…"
-            try await api.updateSpoolCardUids(id: spoolId, uids: updatedUIDs)
+            if let holder = try await api.linkTag(to: spool, uid: uidHex, store: tagStore) {
+                await refreshSpool(id: holder)
+            }
 
             statusMessage = "Cleaning up other spools…"
-            let matchingSpools = try await api.findSpoolsByCardUid(uidHex)
+            let matchingSpools = try await api.findSpoolsByCardUid(uidHex, store: tagStore)
             for otherSpool in matchingSpools where otherSpool.id != spoolId {
-                let cleaned = otherSpool.tagUIDs.filter { $0 != uidHex }
-                if cleaned.count != otherSpool.tagUIDs.count {
-                    try await api.updateSpoolCardUids(id: otherSpool.id, uids: cleaned)
-                    await refreshSpool(id: otherSpool.id)
-                }
+                try await api.unlinkTag(from: otherSpool, uid: uidHex, store: tagStore)
+                await refreshSpool(id: otherSpool.id)
             }
 
             let updatedSpool = await refreshSpool(id: spoolId) ?? spool
@@ -415,7 +429,7 @@ class SpoolmanViewModel: NFCManagerDelegate {
         do {
             // The caller's spool may be a stale snapshot; building on it would drop tags assigned since.
             let freshSpool = try await api.getSpool(id: spool.id)
-            let otherOwners = try await api.findSpoolsByCardUid(uidHex).filter { $0.id != spool.id }
+            let otherOwners = try await api.findSpoolsByCardUid(uidHex, store: tagStore).filter { $0.id != spool.id }
 
             if !otherOwners.isEmpty {
                 let move = PendingTagMove(spool: freshSpool, uidHex: uidHex, tagPayload: tagPayload,
@@ -426,14 +440,16 @@ class SpoolmanViewModel: NFCManagerDelegate {
                 return .needsConfirmation
             }
 
-            if freshSpool.tagUIDs.contains(uidHex) {
+            if freshSpool.tagUIDs.contains(uidHex.uppercased()) {
                 recordAssignmentFailure(spool: freshSpool, uidHex: uidHex, tagPayload: tagPayload,
                                         title: "Tag Already Assigned",
                                         message: "This tag is already assigned to \(spool.displayName) (#\(spool.id)).")
                 return .alreadyAssigned
             }
 
-            try await api.updateSpoolCardUids(id: spool.id, uids: freshSpool.tagUIDs + [uidHex])
+            if let holder = try await api.linkTag(to: freshSpool, uid: uidHex, store: tagStore) {
+                await refreshSpool(id: holder)
+            }
             await recordAssignmentSuccess(spool: freshSpool, uidHex: uidHex, tagPayload: tagPayload, message: "Tag assigned")
             return .assigned
         } catch {
@@ -452,11 +468,11 @@ class SpoolmanViewModel: NFCManagerDelegate {
         do {
             // Re-read both sides: the confirmation may have been open for a while.
             let target = try await api.getSpool(id: move.spool.id)
-            if !target.tagUIDs.contains(move.uidHex) {
-                try await api.updateSpoolCardUids(id: target.id, uids: target.tagUIDs + [move.uidHex])
+            if let holder = try await api.linkTag(to: target, uid: move.uidHex, store: tagStore) {
+                await refreshSpool(id: holder)
             }
-            for other in try await api.findSpoolsByCardUid(move.uidHex) where other.id != target.id {
-                try await api.updateSpoolCardUids(id: other.id, uids: other.tagUIDs.filter { $0 != move.uidHex })
+            for other in try await api.findSpoolsByCardUid(move.uidHex, store: tagStore) where other.id != target.id {
+                try await api.unlinkTag(from: other, uid: move.uidHex, store: tagStore)
                 await refreshSpool(id: other.id)
             }
             await recordAssignmentSuccess(spool: target, uidHex: move.uidHex, tagPayload: move.tagPayload,

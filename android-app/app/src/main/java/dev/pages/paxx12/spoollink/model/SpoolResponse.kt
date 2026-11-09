@@ -14,8 +14,12 @@ data class SpoolResponse(
     val registered: String?,
     @SerializedName("last_used") val lastUsed: String?,
     val extra: ExtraData?,
-    @SerializedName("lot_nr") val lotNr: String? = null
+    @SerializedName("lot_nr") val lotNr: String? = null,
+    val tags: List<SpoolTag>? = null,
+    @Transient val usesNativeTags: Boolean = false
 ) {
+    data class SpoolTag(val uid: String?)
+
     data class FilamentResponse(
         val id: Int = 0,
         val name: String?,
@@ -52,7 +56,17 @@ data class SpoolResponse(
             return if (parts.isEmpty()) "Unnamed Spool" else parts.joinToString(" – ")
         }
 
+    fun forStore(store: TagStore): SpoolResponse = copy(usesNativeTags = store == TagStore.NATIVE)
+
     val tagUIDs: List<String>
+        get() {
+            return if (usesNativeTags) nativeTagUIDs else cardUidEntries
+        }
+
+    val nativeTagUIDs: List<String>
+        get() = tags.orEmpty().mapNotNull { it.uid?.uppercase() }
+
+    val cardUidEntries: List<String>
         get() {
             val raw = extra?.cardUids ?: return emptyList()
             if (raw.isEmpty()) return emptyList()

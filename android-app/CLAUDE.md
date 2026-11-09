@@ -19,7 +19,7 @@ TagFormatParser       → NDEF → NFCTagPayload (formats/ package)
 
 | Package | Contents |
 |---------|----------|
-| `model/` | `SpoolResponse`, `TagPayload` (interface + RawNDEF), `FilamentMetadata`, `FilamentPresets`, `ScanResult` |
+| `model/` | `SpoolResponse`, `TagStore`, `TagPayload` (interface + RawNDEF), `FilamentMetadata`, `FilamentPresets`, `ScanResult` |
 | `formats/` | `OpenSpoolFormat.kt` — `TagFormatParser` object, `OpenSpoolTagPayload` |
 | `api/` | `SpoolmanService` (Retrofit interface), `SpoolmanApi` (wraps Retrofit, exposes suspend funs) |
 | `viewmodel/` | `SpoolmanViewModel` — single ViewModel for entire app |
@@ -67,12 +67,13 @@ Bottom sheets use `ModalBottomSheet`. `SpoolDetailSheet` and `CreateSpoolSheet` 
 | `isLoadingFilaments` | `Boolean` | Filament fetch in progress |
 | `filamentsErrorMessage` | `String?` | Last filament fetch error |
 | `filamentPresets` | `FilamentPresets` | User-defined brand/material/variant/weight presets |
+| `tagStore` | `TagStore` | Selected tag store (`CARD_UIDS` or `NATIVE`) |
 
 Key ViewModel methods: `ensureSpoolsLoaded()`, `fetchSpools(reset)`, `refreshSpoolsIfStale()` (reloads unless the
 last load was under 15 s ago; used by SpoolsScreen on tab selection and ON_RESUME), `loadMoreSpools()`, `processNfcTag()`,
 `processAssignment()`, `startTagAssignment(spool)`, `cancelTagAssignment()`, `removeTag(uidHex, spool)`,
 `removeAllTags(spool)`, `createSpoolFromTag()`, `loadFilaments()`, `loadFilamentsIfNeeded()`, `updatePresets(presets)`,
-`savedBaseUrl()`, `updateBaseUrl(url)`, `savedNameStyle()`, `saveNameStyle(style)`.
+`savedBaseUrl()`, `updateBaseUrl(url)`, `updateTagStore(store)`, `moveTagsToSelectedStore()`, `savedNameStyle()`, `saveNameStyle(style)`.
 
 `processAssignment()` returns a `TagAssignmentOutcome`. If the tag is on another spool it sets `pendingTagMove` and
 writes nothing (unless called with `confirmMove = false`, as `AssignSpoolSheet` does, which moves it directly); the UI confirms with `confirmTagMove(move)` or calls `declineTagMove()`. Errors (including "already
@@ -86,6 +87,7 @@ All Spoolman endpoints are under `api/v1/`:
 - `GET api/v1/spool?limit=&offset=` — paginated spool list
 - `GET api/v1/spool/{id}` — single spool
 - `PATCH api/v1/spool/{id}` — update `extra.card_uids`
+- `POST api/v1/spool/{id}/tag`, `DELETE api/v1/spool/{id}/tag/{uid}` — link/unlink a native tag
 - `GET api/v1/filament?limit=&offset=` — paginated filament list
 - `POST api/v1/filament` — create filament
 - `GET api/v1/vendor` / `POST api/v1/vendor` — vendor lookup/create
@@ -93,20 +95,23 @@ All Spoolman endpoints are under `api/v1/`:
 - `GET api/v1/info` — server info (connection test)
 - `GET api/v1/field/spool` / `POST api/v1/field/spool/card_uids` — ensure custom field exists
 
-`SpoolmanApi.updateSpoolCardUids(id, uids)` patches `extra.card_uids` with a JSON-encoded comma-separated string.
-Call `ensureField("spool", "card_uids", ...)` before the first write.
+Tag writes go through `SpoolmanApi.linkTag(spool, uid)`, `unlinkTag(spool, uid)` and `unlinkAllTags(spool)`, which use
+the selected `TagStore`. In the `CARD_UIDS` store they patch `extra.card_uids` with a JSON-encoded comma-separated
+string; `ensureField("spool", "card_uids", ...)` must run before the first write. `SpoolmanApi` tags every returned
+spool with the store via `forStore()`, so `SpoolResponse.tagUIDs` reads the right one. `migrateTags(target)` moves every
+link between stores, following the firmware's `spoollink_migrate.py`.
 
 ## card_uids Format
 
-Tag UIDs are stored in the spool's `extra.card_uids` custom field as a JSON-encoded comma-separated string
-of uppercase hex UIDs:
+In the `CARD_UIDS` store, tag UIDs are stored in the spool's `extra.card_uids` custom field as a JSON-encoded
+comma-separated string of uppercase hex UIDs:
 
 ```
 "AABBCCDD,11223344"
 ```
 
-`SpoolResponse.tagUIDs` parses out all entries, uppercased (other clients may have written lowercase). `tagCount` is `tagUIDs.size`. The field value itself is
-JSON-encoded (double-serialized string) as required by Spoolman's custom field API.
+`SpoolResponse.tagUIDs` parses out all entries, uppercased (other clients may have written lowercase), or reads `tags` in the `NATIVE` store. `tagCount` is `tagUIDs.size`.
+The field value itself is JSON-encoded (double-serialized string) as required by Spoolman's custom field API.
 
 ## State in ViewModel
 
@@ -122,6 +127,7 @@ Visibility pattern: expose as `private set` where the UI only reads, no setter o
 `SharedPreferences("spoolman_prefs", MODE_PRIVATE)` stores:
 
 - `base_url` — Spoolman server URL (normalized: always ends with `/`, has `http://` prefix)
+- `tag_store` — `TagStore.name` enum name
 - `filamentNameStyle` — `FilamentNameStyle.name` enum name
 - `filamentPresets` — JSON-encoded `FilamentPresets`
 - `spools_sort_by` / `spools_sort_ascending` — Spools screen `SpoolSort.name` and direction (read in `SpoolsScreen`)
