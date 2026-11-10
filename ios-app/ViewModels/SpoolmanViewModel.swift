@@ -306,8 +306,6 @@ class SpoolmanViewModel: NFCManagerDelegate {
 
     func startTagAssignment(for spool: SpoolResponse) {
         lastResult = nil
-    func startTagAssignment(for spool: SpoolResponse) {
-        lastResult = nil
         lastAssignmentResult = nil
         // Leaving pendingAssignSpool set without a session would keep the Assign button spinning forever.
         guard nfcManager.startScanning() else {
